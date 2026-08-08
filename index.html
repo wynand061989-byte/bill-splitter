@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08111f">
+<title>Group Bill Splitter</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+:root{--bg:#08111f;--card:#111827;--panel:#0d1727;--line:#304058;--text:#f8fafc;--muted:#94a3b8;--green:#22c55e;--red:#ef4444}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#06101d,#0b1220);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;min-height:100vh}
+.app{max-width:760px;margin:auto;padding:18px 14px 80px}
+h1{margin:4px 0;font-size:30px}.sub{color:var(--muted);margin-bottom:18px}
+.page{display:none}.page.active{display:block}
+.card{background:var(--card);border:1px solid #243043;border-radius:18px;padding:16px;margin:14px 0}
+.title{font-size:20px;font-weight:900;margin-bottom:10px}.small{font-size:12px;color:var(--muted)}
+input,select,button{font:inherit}
+input,select{width:100%;background:#0f172a;color:white;border:1px solid var(--line);border-radius:12px;padding:12px}
+button{border:0;border-radius:12px;padding:13px 14px;font-weight:850;cursor:pointer}
+.primary{background:var(--green);color:#052e16}.secondary{background:#263244;color:white}.danger{background:#3b1d22;color:#fecaca}
+.file{display:block;width:100%;margin:10px 0;color:#dbeafe}
+.file::file-selector-button{border:0;border-radius:12px;padding:12px 14px;margin-right:10px;background:#263244;color:white;font-weight:800}
+.photo{margin-top:12px;border:2px dashed var(--line);border-radius:16px;min-height:170px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#0b1525}
+.photo img{width:100%;max-height:520px;object-fit:contain}.placeholder{text-align:center;color:var(--muted);padding:24px}
+.notice{background:#0f2138;border:1px solid #294765;border-radius:14px;padding:12px;color:#cbd5e1;margin-top:10px}
+.good{border-color:#2b6f47;color:#bbf7d0}.warn{border-color:#8a6a25;color:#fde68a}.hidden{display:none!important}
+.editRow{display:grid;grid-template-columns:1fr 100px 80px auto;gap:8px;align-items:center;margin:9px 0}
+.progress{display:flex;justify-content:space-between;gap:10px;align-items:center;background:#0b1525;border:1px solid #24334a;border-radius:14px;padding:12px}
+.badge{padding:6px 10px;border-radius:999px;background:#182235;border:1px solid #2d3a4e;color:#cbd5e1;font-size:12px}
+.item{background:var(--panel);border:1px solid #2a394e;border-radius:14px;padding:13px;margin:10px 0}
+.itemHead{display:flex;justify-content:space-between;gap:10px}.name{font-weight:900}.price{color:#86efac;font-weight:900}
+.totalbox{background:#0b1525;border:1px solid #24334a;border-radius:14px;padding:14px}.totalbox div{display:flex;justify-content:space-between;padding:5px 0}.grand{font-size:22px;font-weight:950}
+.summaryRow{display:grid;grid-template-columns:1fr auto;gap:10px;padding:12px 0;border-bottom:1px solid #283447}.amount{color:#86efac;font-size:18px;font-weight:950}
+@media(max-width:560px){.editRow{grid-template-columns:1fr 85px 70px}.editRow button{grid-column:1/-1;width:100%}}
+</style>
+</head>
+<body>
+<div class="app">
+<h1>🧾 Group Bill Splitter</h1>
+<div class="sub">Upload the receipt, review the detected items, then pass the phone around.</div><div class="small" style="margin-bottom:12px">Build 10 — iPhone upload-state + improved OCR</div>
+
+<section id="setup" class="page active">
+  <div class="card">
+    <div class="title">1. Upload the bill</div>
+    <input id="photoInput" class="file" type="file" accept="image/*">
+    <div class="photo">
+      <div id="placeholder" class="placeholder">No bill uploaded yet</div>
+      <img id="preview" class="hidden" alt="Receipt preview">
+    </div>
+    <div id="uploadStatus" class="notice hidden"></div>
+  </div>
+  <div class="card">
+    <div class="title">2. Number of people</div>
+    <input id="peopleCount" type="number" min="1" step="1" inputmode="numeric" placeholder="How many people?">
+  </div>
+  <button id="confirmSetup" class="primary" style="width:100%">Confirm Bill & Continue</button>
+</section>
+
+<section id="review" class="page">
+  <div class="card">
+    <div class="title">Review detected items</div>
+    <div id="scanStatus" class="notice">Preparing receipt…</div>
+    <div id="reviewItems"></div>
+    <button id="retryScan" class="secondary hidden" style="width:100%;margin-top:10px">Retry automatic scan</button>
+    <button id="addManual" class="secondary" style="width:100%;margin-top:10px">+ Add missing item</button>
+  </div>
+  <button id="startPeople" class="primary" style="width:100%">Start Person 1</button>
+</section>
+
+<section id="person" class="page">
+  <div class="card">
+    <div class="progress">
+      <div><div class="small">Current turn</div><div id="turnTitle" style="font-size:22px;font-weight:950"></div></div>
+      <span id="turnBadge" class="badge"></span>
+    </div>
+  </div>
+  <div class="card"><div class="title">Your name</div><input id="personName" placeholder="Enter your name"></div>
+  <div class="card">
+    <div class="title">What did you consume?</div>
+    <select id="itemDropdown"></select>
+    <input id="consumeQty" type="number" min="1" step="1" value="1" inputmode="numeric" style="margin-top:10px">
+    <button id="addSelection" class="secondary" style="width:100%;margin-top:10px">Add Item</button>
+    <div id="selectedList"></div>
+  </div>
+  <button id="submitPerson" class="primary" style="width:100%">Submit My Items</button>
+</section>
+
+<section id="result" class="page">
+  <div class="card"><div class="title">Your total</div>
+    <div class="totalbox">
+      <div><span id="resultName"></span><strong id="resultSub"></strong></div>
+      <div><span>10% tip</span><strong id="resultTip"></strong></div>
+      <div class="grand"><span>Total</span><span id="resultTotal"></span></div>
+    </div>
+  </div>
+  <button id="nextPerson" class="primary" style="width:100%">Pass to Next Person</button>
+</section>
+
+<section id="summary" class="page">
+  <div class="card"><div class="title">Final summary</div><div id="summaryList"></div></div>
+  <button id="reset" class="danger" style="width:100%">Start New Bill</button>
+</section>
+</div>
+
+<script>
+let receiptFile=null,previewUrl='',expectedPeople=0,items=[],people=[],activeSelections={},scanBusy=false,lastFileSig='';
+const $=id=>document.getElementById(id);
+const money=v=>'R'+Number(v||0).toFixed(2);
+const esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  $(id).classList.add('active'); window.scrollTo(0,0);
+}
+
+function syncSelectedFile(force=false){
+  const input=$('photoInput');
+  const f=input && input.files && input.files[0];
+  if(!f) return false;
+
+  const sig=[f.name,f.size,f.lastModified].join('|');
+
+  // Avoid repeatedly rereading the same large iPhone image.
+  if(!force && sig===lastFileSig && receiptFile){
+    return true;
+  }
+
+  lastFileSig=sig;
+  receiptFile=f;
+
+  const reader=new FileReader();
+
+  reader.onload=()=>{
+    $('preview').src=reader.result;
+    $('preview').classList.remove('hidden');
+    $('placeholder').classList.add('hidden');
+  };
+
+  reader.onerror=()=>{
+    $('preview').classList.add('hidden');
+    $('placeholder').classList.remove('hidden');
+    $('placeholder').innerHTML='✅<br><strong>Bill selected</strong><br><span class="small">Preview unavailable, but the photo is ready.</span>';
+  };
+
+  reader.readAsDataURL(f);
+
+  $('uploadStatus').textContent='✓ Bill selected: '+(f.name||'receipt photo');
+  $('uploadStatus').className='notice good';
+
+  return true;
+}
+
+$('photoInput').addEventListener('change',syncSelectedFile);
+$('photoInput').addEventListener('input',syncSelectedFile);
+$('photoInput').addEventListener('blur',syncSelectedFile);
+
+// iOS/Safari can show a selected filename without dispatching change/input.
+// Poll the native file input so the app state always catches up.
+setInterval(()=>{
+  const input=$('photoInput');
+  if(input && input.files && input.files.length){
+    syncSelectedFile(false);
+  }
+},400);
+
+
+function parseMoney(s){
+  if(!s)return null; s=String(s).replace(/[^\d,.\-]/g,'');
+  const c=s.lastIndexOf(','),d=s.lastIndexOf('.');
+  if(c>d)s=s.replace(/\./g,'').replace(',','.'); else s=s.replace(/,/g,'');
+  const n=parseFloat(s); return Number.isFinite(n)?n:null;
+}
+
+function parseReceipt(text){
+  let lines=text
+    .split(/\r?\n/)
+    .map(x=>x.replace(/\s+/g,' ').trim())
+    .filter(Boolean);
+
+  const ignore=/\b(order|proforma|tax invoice|street|avenue|centurion|tel|date|receipt|employee|tag|eat in|total due|service charge|subtotal|total|vat|tax|cash|change|card|visa|mastercard|thank|amount due)\b/i;
+
+  const out=[];
+  let pending=null;
+
+  const cleanName=s=>s
+    .replace(/[|*_~]+/g,' ')
+    .replace(/\s+/g,' ')
+    .replace(/^[^A-Za-z]+|[^A-Za-z0-9()]+$/g,'')
+    .trim();
+
+  const validName=s=>{
+    if(!s || s.length<2 || ignore.test(s)) return false;
+    if(!/[A-Za-z]/.test(s)) return false;
+
+    // Reject OCR fragments that are mainly numbers/symbols.
+    const letters=(s.match(/[A-Za-z]/g)||[]).length;
+    const digits=(s.match(/\d/g)||[]).length;
+    return letters>=2 && letters>=digits;
+  };
+
+  const flush=()=>{
+    if(!pending) return;
+
+    if(validName(pending.name) && Number(pending.unit)>0){
+      pending.qty=Math.max(1,parseInt(pending.qty,10)||1);
+      pending.unit=Number(pending.unit);
+      out.push(pending);
+    }
+
+    pending=null;
+  };
+
+  for(let idx=0;idx<lines.length;idx++){
+    let line=lines[idx]
+      .replace(/[€©]/g,'@')
+      .replace(/[Oo](?=\s*\d{1,5}[.,]\d{2})/g,'@')
+      .trim();
+
+    if(ignore.test(line)){
+      flush();
+      continue;
+    }
+
+    // Quantity/unit line. Tolerates OCR variants:
+    // 9 @ 90,05 | 3 € 29.68 | 8 6 34,96 | 2@84,00 | 24 84,00.
+    const q=line.match(/^\D*(\d{1,2})\s*(?:@|x|X|0|6|8|4|\s)\s*(\d{1,5})\s*[.,]\s*(\d{2})(?:\D.*)?$/);
+
+    if(q && pending){
+      const qty=parseInt(q[1],10);
+      const unit=parseFloat(q[2]+'.'+q[3]);
+
+      if(qty>=1 && qty<=50 && unit>0){
+        pending.qty=qty;
+        pending.unit=unit;
+        flush();
+        continue;
+      }
+    }
+
+    // Item plus right-column amount.
+    const amount=line.match(/^(.+?)\s+(\d{1,6})\s*[.,]\s*(\d{2})(?:\D*)$/);
+
+    if(amount){
+      const name=cleanName(amount[1]);
+      const value=parseFloat(amount[2]+'.'+amount[3]);
+
+      if(validName(name) && value>0){
+        flush();
+        pending={name,qty:1,unit:value};
+        continue;
+      }
+    }
+
+    // Some OCR runs split an amount into a second line, e.g.
+    // "KWV 3 Year Special 168" then "166 , 00".
+    const partial=line.match(/^(.+?[A-Za-z].*?)\s+(\d{1,5})$/);
+    if(partial && validName(cleanName(partial[1]))){
+      const next=(lines[idx+1]||'').replace(/\s+/g,' ').trim();
+      const decimal=next.match(/^\D*(\d{1,5})\s*[.,]\s*(\d{2})\D*$/);
+
+      if(decimal){
+        flush();
+        pending={
+          name:cleanName(partial[1]),
+          qty:1,
+          unit:parseFloat(decimal[1]+'.'+decimal[2])
+        };
+        idx++;
+        continue;
+      }
+    }
+
+    // Name-only line. Keep it temporarily because the following line may
+    // contain quantity/unit price or a separately recognised amount.
+    const nameOnly=cleanName(line);
+
+    if(validName(nameOnly) && !/\d{2,}/.test(nameOnly)){
+      // Avoid modifiers such as "Normal" becoming standalone charged items.
+      if(/^(normal|regular|large|small|medium)$/i.test(nameOnly)) continue;
+
+      flush();
+      pending={name:nameOnly,qty:1,unit:0};
+      continue;
+    }
+
+    // If unrelated OCR follows an unresolved name, discard it rather than
+    // turning the garbage into a bill item.
+    if(pending && !pending.unit){
+      pending=null;
+    }
+  }
+
+  flush();
+
+  // Final cleanup and conservative duplicate merge.
+  const merged=[];
+
+  for(const item of out){
+    const name=item.name
+      .replace(/\bWeter\b/gi,'Water')
+      .replace(/\bPirze\b/gi,'Pizza')
+      .replace(/\bSpecia!\b/gi,'Special')
+      .replace(/\s+/g,' ')
+      .trim();
+
+    const existing=merged.find(x=>
+      x.name.toLowerCase()===name.toLowerCase() &&
+      Math.abs(x.unit-item.unit)<0.03
+    );
+
+    if(existing) existing.qty+=item.qty;
+    else merged.push({name,qty:item.qty,unit:item.unit});
+  }
+
+  return merged;
+}
+async function preprocessImage(file){
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((resolve,reject)=>{
+      const im=new Image();
+      im.onload=()=>resolve(im);
+      im.onerror=reject;
+      im.src=url;
+    });
+
+    // Upscale first: receipt fonts are small and thermal printing benefits from more pixels.
+    const targetW=Math.min(1800,Math.max(1200,img.width*1.6));
+    const scale=targetW/img.width;
+
+    const c=document.createElement('canvas');
+    c.width=Math.round(img.width*scale);
+    c.height=Math.round(img.height*scale);
+
+    const ctx=c.getContext('2d',{willReadFrequently:true});
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,c.width,c.height);
+    ctx.drawImage(img,0,0,c.width,c.height);
+
+    const data=ctx.getImageData(0,0,c.width,c.height);
+    const px=data.data;
+
+    // Build grayscale histogram.
+    const hist=new Array(256).fill(0);
+    const gray=new Uint8Array(c.width*c.height);
+
+    for(let p=0,i=0;i<px.length;i+=4,p++){
+      let g=Math.round(.299*px[i]+.587*px[i+1]+.114*px[i+2]);
+
+      // Slight contrast stretch before Otsu.
+      g=Math.max(0,Math.min(255,Math.round((g-128)*1.35+128)));
+      gray[p]=g;
+      hist[g]++;
+    }
+
+    // Otsu's method: choose the threshold that best separates ink from paper.
+    const total=gray.length;
+    let sum=0;
+    for(let i=0;i<256;i++) sum+=i*hist[i];
+
+    let sumB=0,wB=0,wF=0,maxVar=-1,threshold=160;
+
+    for(let t=0;t<256;t++){
+      wB+=hist[t];
+      if(wB===0) continue;
+
+      wF=total-wB;
+      if(wF===0) break;
+
+      sumB+=t*hist[t];
+
+      const mB=sumB/wB;
+      const mF=(sum-sumB)/wF;
+      const between=wB*wF*(mB-mF)*(mB-mF);
+
+      if(between>maxVar){
+        maxVar=between;
+        threshold=t;
+      }
+    }
+
+    // Slightly bias threshold toward preserving faint receipt characters.
+    threshold=Math.min(220,threshold+10);
+
+    for(let p=0,i=0;i<px.length;i+=4,p++){
+      const v=gray[p]>threshold?255:0;
+      px[i]=px[i+1]=px[i+2]=v;
+      px[i+3]=255;
+    }
+
+    ctx.putImageData(data,0,0);
+    return c.toDataURL('image/png');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+function timeout(ms){
+  return new Promise((_,reject)=>setTimeout(()=>reject(new Error('OCR_TIMEOUT')),ms));
+}
+
+async function runScan(){
+  if(scanBusy||!receiptFile)return;
+  scanBusy=true;
+  $('retryScan').classList.add('hidden');
+  $('scanStatus').className='notice';
+  $('scanStatus').textContent='Preparing receipt image…';
+  try{
+    const processed=await preprocessImage(receiptFile);
+    $('scanStatus').textContent='Starting text recognition…';
+
+    const recognizePromise=Tesseract.recognize(processed,'eng',{
+      tessedit_pageseg_mode:'6',
+      preserve_interword_spaces:'1',
+      logger:m=>{
+        if(m.status==='loading tesseract core') $('scanStatus').textContent='Loading scanner…';
+        else if(m.status==='initializing tesseract') $('scanStatus').textContent='Initializing scanner…';
+        else if(m.status==='loading language traineddata') $('scanStatus').textContent='Loading language data…';
+        else if(m.status==='initializing api') $('scanStatus').textContent='Preparing recognition…';
+        else if(m.status==='recognizing text') $('scanStatus').textContent='Reading receipt… '+Math.round((m.progress||0)*100)+'%';
+      }
+    });
+
+    const r=await Promise.race([recognizePromise,timeout(45000)]);
+    items=parseReceipt(r.data.text||'');
+
+    if(items.length){
+      $('scanStatus').textContent='✓ Receipt read. Review the detected items below.';
+      $('scanStatus').className='notice good';
+    }else{
+      $('scanStatus').textContent='Automatic scan finished but could not confidently identify items. Add or correct the items below.';
+      $('scanStatus').className='notice warn';
+      if(!items.length) items.push({name:'Item',qty:1,unit:0});
+    }
+  }catch(e){
+    console.error(e);
+    $('scanStatus').textContent=e&&e.message==='OCR_TIMEOUT'
+      ? 'The phone scanner took too long. You can enter the items manually now, or tap Retry automatic scan.'
+      : 'Automatic scan could not start on this phone. You can enter the items manually now.';
+    $('scanStatus').className='notice warn';
+    $('retryScan').classList.remove('hidden');
+    if(!items.length) items.push({name:'Item',qty:1,unit:0});
+  }finally{
+    scanBusy=false; renderReview();
+  }
+}
+
+function renderReview(){
+  const el=$('reviewItems');
+  el.innerHTML=items.map((x,i)=>`<div class="editRow">
+    <input value="${esc(x.name)}" onchange="items[${i}].name=this.value">
+    <input type="number" step="0.01" value="${Number(x.unit||0).toFixed(2)}" onchange="items[${i}].unit=+this.value">
+    <input type="number" min="1" value="${x.qty||1}" onchange="items[${i}].qty=Math.max(1,+this.value||1)">
+    <button class="danger" onclick="items.splice(${i},1);renderReview()">Delete</button>
+  </div>`).join('');
+}
+
+$('confirmSetup').addEventListener('click',()=>{
+  // iOS can display a selected filename without firing change/input reliably.
+  // Always read the file directly from the native input at the moment Continue is pressed.
+  syncSelectedFile(true);
+
+  expectedPeople=parseInt($('peopleCount').value,10);
+
+  const selected=$('photoInput') && $('photoInput').files && $('photoInput').files[0];
+  if(!selected){
+    alert('Please choose the receipt photo first.');
+    return;
+  }
+
+  receiptFile=selected;
+
+  if(!Number.isInteger(expectedPeople)||expectedPeople<1){
+    alert('Enter the number of people.');
+    return;
+  }
+
+  showPage('review');
+  runScan();
+});
+
+$('retryScan').addEventListener('click',()=>{items=[];renderReview();runScan()});
+$('addManual').addEventListener('click',()=>{items.push({name:'Item',qty:1,unit:0});renderReview()});
+
+$('startPeople').addEventListener('click',()=>{
+  items=items.filter(x=>String(x.name||'').trim()&&Number(x.unit)>0&&Number(x.qty)>0);
+  if(!items.length)return alert('Add at least one valid item with a price.');
+  startPerson();
+});
+
+function claimedQty(index){return people.reduce((s,p)=>s+Number((p.selections||{})[index]||0),0)}
+function remainingQty(index){return Math.max(0,items[index].qty-claimedQty(index))}
+function startPerson(){
+  activeSelections={}; $('personName').value='';
+  $('turnTitle').textContent='Person '+(people.length+1); $('turnBadge').textContent=(people.length+1)+' of '+expectedPeople;
+  renderDropdown();renderSelected();showPage('person');
+}
+function renderDropdown(){
+  const a=items.map((x,i)=>({x,i,rem:remainingQty(i)})).filter(o=>o.rem>0);
+  $('itemDropdown').innerHTML='<option value="">Select an item…</option>'+a.map(o=>`<option value="${o.i}">${esc(o.x.name)} — ${money(o.x.unit)} — ${o.rem} left</option>`).join('');
+  $('consumeQty').value='1';
+}
+$('addSelection').addEventListener('click',()=>{
+  const i=parseInt($('itemDropdown').value,10); if(!Number.isInteger(i))return alert('Select an item first.');
+  let q=parseInt($('consumeQty').value,10); if(!Number.isInteger(q)||q<1)return alert('Enter a valid quantity.');
+  const current=Number(activeSelections[i]||0),max=remainingQty(i);
+  if(current+q>max)return alert('Only '+max+' remain.');
+  activeSelections[i]=current+q;renderSelected();
+});
+function renderSelected(){
+  const e=Object.entries(activeSelections).filter(([,q])=>Number(q)>0);
+  $('selectedList').innerHTML=e.length?e.map(([i,q])=>{const x=items[Number(i)];return `<div class="item"><div class="itemHead"><div><div class="name">${esc(x.name)}</div><div class="small">${q} × ${money(x.unit)}</div></div><div class="price">${money(q*x.unit)}</div></div></div>`}).join(''):'<div class="small" style="padding:12px 0">No items selected yet.</div>';
+}
+$('submitPerson').addEventListener('click',()=>{
+  const name=$('personName').value.trim(); if(!name)return alert('Enter your name.');
+  const e=Object.entries(activeSelections).filter(([,q])=>Number(q)>0); if(!e.length)return alert('Add at least one item.');
+  let sub=0,selections={};e.forEach(([i,q])=>{selections[i]=Number(q);sub+=items[Number(i)].unit*Number(q)});
+  const tip=sub*.10,total=sub+tip;people.push({name,selections,sub,tip,total});
+  $('resultName').textContent=name;$('resultSub').textContent=money(sub);$('resultTip').textContent=money(tip);$('resultTotal').textContent=money(total);
+  const done=people.length>=expectedPeople||items.every((_,i)=>remainingQty(i)===0);
+  $('nextPerson').textContent=done?'Show Final Summary':'Pass to Next Person';showPage('result');
+});
+$('nextPerson').addEventListener('click',()=>{
+  const done=people.length>=expectedPeople||items.every((_,i)=>remainingQty(i)===0);
+  if(done){renderSummary();showPage('summary')}else startPerson();
+});
+function renderSummary(){
+  const rows=people.map(p=>`<div class="summaryRow"><div><strong>${esc(p.name)}</strong><div class="small">${money(p.sub)} + ${money(p.tip)} tip</div></div><div class="amount">${money(p.total)}</div></div>`).join('');
+  const sub=people.reduce((s,p)=>s+p.sub,0),tip=people.reduce((s,p)=>s+p.tip,0),total=people.reduce((s,p)=>s+p.total,0);
+  $('summaryList').innerHTML=rows+`<div class="totalbox" style="margin-top:12px"><div><span>Items</span><strong>${money(sub)}</strong></div><div><span>10% tip</span><strong>${money(tip)}</strong></div><div class="grand"><span>Total</span><span>${money(total)}</span></div></div>`;
+}
+$('reset').addEventListener('click',()=>location.reload());
+</script>
+</body>
+</html>
