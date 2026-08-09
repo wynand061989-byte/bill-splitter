@@ -38,7 +38,7 @@ button{border:0;border-radius:12px;padding:13px 14px;font-weight:850;cursor:poin
 <body>
 <div class="app">
 <h1>🧾 Group Bill Splitter</h1>
-<div class="sub">Upload the receipt, review the detected items, then pass the phone around.</div><div class="small" style="margin-bottom:12px">Build 15 — upload/navigation diagnostic</div>
+<div class="sub">Upload the receipt, review the detected items, then pass the phone around.</div><div class="small" style="margin-bottom:12px">Build 16 — receipt parser + service charge</div>
 
 <section id="setup" class="page active">
   <div class="card">
@@ -99,7 +99,7 @@ button{border:0;border-radius:12px;padding:13px 14px;font-weight:850;cursor:poin
   <div class="card"><div class="title">Your total</div>
     <div class="totalbox">
       <div><span id="resultName"></span><strong id="resultSub"></strong></div>
-      <div><span>10% tip</span><strong id="resultTip"></strong></div>
+      <div><span id="resultTipLabel">Service/tip</span><strong id="resultTip"></strong></div>
       <div class="grand"><span>Total</span><span id="resultTotal"></span></div>
     </div>
   </div>
@@ -113,7 +113,7 @@ button{border:0;border-radius:12px;padding:13px 14px;font-weight:850;cursor:poin
 </div>
 
 <script>
-let receiptFile=null,previewUrl='',expectedPeople=0,items=[],people=[],activeSelections={},scanBusy=false;
+let receiptFile=null,previewUrl='',expectedPeople=0,items=[],people=[],activeSelections={},scanBusy=false,detectedServiceRate=0.10,serviceChargeDetected=false,detectedSubtotal=null,detectedServiceCharge=null;
 const $=id=>document.getElementById(id);
 const money=v=>'R'+Number(v||0).toFixed(2);
 const esc=s=>String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -179,29 +179,179 @@ function parseMoney(s){
 
 /* ONLY THIS FUNCTION IS CHANGED FROM THE WORKING BASELINE */
 function parseReceipt(text){
-  const lines=text.split(/\r?\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
-  const ignore=/\b(total|subtotal|service charge|vat|tax|cash|change|card|receipt|date|employee|table|order|thank|invoice|address|tel)\b/i;
-  const out=[]; let pending=null;
-  const flush=()=>{if(pending){out.push(pending);pending=null}};
-  for(const raw of lines){
-    const line=raw.trim();
-    const q=line.match(/^\s*(\d{1,2})\s*(?:@|x|X|0)\s*(\d{1,5}[.,]\d{2})\s*$/);
-    if(q&&pending){
-      pending.qty=Math.max(1,parseInt(q[1],10)||1);
-      const unit=parseMoney(q[2]); if(unit!==null)pending.unit=unit;
-      flush(); continue;
+  const rawLines=text
+    .split(/\r?\n/)
+    .map(x=>x.replace(/\s+/g,' ').trim())
+    .filter(Boolean);
+
+  const lines=rawLines.map(line=>
+    line
+      .replace(/[€©®]/g,'@')
+      .replace(/\s+/g,' ')
+      .trim()
+  );
+
+  const ignore=/\b(order|proforma|tax invoice|street|avenue|centurion|tel|date|receipt|employee|tag|eat in|cash|change|card|thank|vat|tax)\b/i;
+  const modifier=/^(normal|regular|small|medium|large)$/i;
+  const out=[];
+  let pending=null;
+
+  detectedSubtotal=null;
+  detectedServiceCharge=null;
+  serviceChargeDetected=false;
+  detectedServiceRate=0.10;
+
+  const cleanName=s=>String(s||'')
+    .replace(/[|*_~]+/g,' ')
+    .replace(/\s+/g,' ')
+    .replace(/^[^A-Za-z]+/,'')
+    .replace(/[^A-Za-z0-9()&' -]+$/,'')
+    .trim();
+
+  const validName=s=>{
+    if(!s || ignore.test(s) || modifier.test(s)) return false;
+    const letters=(s.match(/[A-Za-z]/g)||[]).length;
+    const digits=(s.match(/\d/g)||[]).length;
+    return letters>=2 && letters>=Math.max(1,digits);
+  };
+
+  const add=(name,qty,unit)=>{
+    name=cleanName(name);
+    qty=Math.max(1,parseInt(qty,10)||1);
+    unit=Number(unit||0);
+    if(!validName(name) || unit<=0) return;
+    out.push({name,qty,unit});
+  };
+
+  const qtyUnit=line=>{
+    // Normal: 9 @ 90,05
+    let m=line.match(/^\s*(\d{1,2})\s*(?:@|x|X|×)\s*(\d{1,5}[.,]\d{2})\s*$/);
+    if(m) return {qty:+m[1],unit:parseMoney(m[2])};
+
+    // Common OCR mistakes where @ becomes 0/6/8/O
+    m=line.match(/^\s*(\d{1,2})\s*(?:0|6|8|O)\s*(\d{1,5}[.,]\d{2})\s*$/i);
+    if(m) return {qty:+m[1],unit:parseMoney(m[2])};
+
+    // Sometimes OCR removes the separator completely: "9 90,05"
+    m=line.match(/^\s*(\d{1,2})\s+(\d{1,5}[.,]\d{2})\s*$/);
+    if(m) return {qty:+m[1],unit:parseMoney(m[2])};
+
+    return null;
+  };
+
+  const flush=()=>{
+    if(pending){
+      add(pending.name,pending.qty,pending.unit);
+      pending=null;
     }
-    if(ignore.test(line)){flush();continue}
-    const m=line.match(/^(.+?)\s+(?:R\s*)?(\d{1,6}[.,]\d{2})\s*$/i);
+  };
+
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+
+    // Totals/service-charge detection first.
+    let m=line.match(/\bTOTAL\b\s*[:\-]?\s*(\d{1,7}[.,]\d{2})\s*$/i);
+    if(m && !/TOTAL DUE/i.test(line)){
+      const v=parseMoney(m[1]);
+      if(v>0) detectedSubtotal=v;
+      flush();
+      continue;
+    }
+
+    m=line.match(/\bSERVICE\s*CHARGE\b.*?(\d{1,7}[.,]\d{2})\s*$/i);
     if(m){
-      const name=m[1].trim(),price=parseMoney(m[2]);
-      if(name.length>=2&&/[A-Za-z]/.test(name)&&price>0){
-        flush(); pending={name,qty:1,unit:price}; continue;
+      const v=parseMoney(m[1]);
+      if(v>0){
+        detectedServiceCharge=v;
+        serviceChargeDetected=true;
+      }
+      flush();
+      continue;
+    }
+
+    if(/TOTAL DUE/i.test(line)){
+      flush();
+      continue;
+    }
+
+    if(ignore.test(line)){
+      flush();
+      continue;
+    }
+
+    // Qty/unit line belongs to item directly above.
+    const qu=qtyUnit(line);
+    if(qu && pending){
+      pending.qty=qu.qty;
+      pending.unit=qu.unit;
+      flush();
+      continue;
+    }
+
+    // Merged OCR: "Olofberg Special 9 @ 90,05 810,45"
+    m=line.match(/^(.+?)\s+(\d{1,2})\s*(?:@|x|X|×|0|6|8|O)\s*(\d{1,5}[.,]\d{2})\s+(\d{1,7}[.,]\d{2})\s*$/i);
+    if(m){
+      flush();
+      add(m[1],m[2],parseMoney(m[3]));
+      continue;
+    }
+
+    // Item plus printed line total, e.g. "Coke 89,04"
+    m=line.match(/^(.+?)\s+(\d{1,7}[.,]\d{2})\s*$/);
+    if(m){
+      const name=cleanName(m[1]);
+      const lineTotal=parseMoney(m[2]);
+
+      if(validName(name) && lineTotal>0){
+        flush();
+        pending={name,qty:1,unit:lineTotal};
+
+        // Look ahead for quantity/unit line.
+        const next=lines[i+1]||'';
+        const nextQU=qtyUnit(next);
+        if(nextQU){
+          pending.qty=nextQU.qty;
+          pending.unit=nextQU.unit;
+          flush();
+          i++;
+        }
+        continue;
       }
     }
-    if(pending)flush();
+
+    // Skip modifier line such as "Normal".
+    if(modifier.test(cleanName(line))) continue;
+
+    // If a valid pending item exists and unrelated text follows, keep it.
+    if(pending){
+      flush();
+    }
   }
-  flush(); return out;
+
+  flush();
+
+  // Infer service rate from printed amounts when available.
+  if(serviceChargeDetected && detectedSubtotal && detectedSubtotal>0){
+    detectedServiceRate=detectedServiceCharge/detectedSubtotal;
+  }else{
+    detectedServiceRate=0.10;
+  }
+
+  // Remove exact duplicates only.
+  const dedup=[];
+  for(const item of out){
+    const exists=dedup.some(x=>
+      x.name.toLowerCase()===item.name.toLowerCase() &&
+      x.qty===item.qty &&
+      Math.abs(x.unit-item.unit)<0.01
+    );
+    if(!exists) dedup.push(item);
+  }
+
+  console.log('RAW OCR TEXT:',text);
+  console.log('PARSED ITEMS:',dedup);
+  console.log('SERVICE CHARGE DETECTED:',serviceChargeDetected, detectedServiceCharge, detectedSubtotal, detectedServiceRate);
+  return dedup;
 }
 
 async function preprocessImage(file){
@@ -255,7 +405,12 @@ async function runScan(){
     items=parseReceipt(r.data.text||'');
 
     if(items.length){
-      $('scanStatus').textContent='✓ Receipt read. Review the detected items below.';
+      if(serviceChargeDetected){
+        const pct=(detectedServiceRate*100).toFixed(1).replace('.0','');
+        $('scanStatus').textContent='✓ Receipt read. Existing '+pct+'% service charge detected — no extra tip will be added.';
+      }else{
+        $('scanStatus').textContent='✓ Receipt read. No service charge detected — 10% tip will be added.';
+      }
       $('scanStatus').className='notice good';
     }else{
       $('scanStatus').textContent='Automatic scan finished but could not confidently identify items. Add or correct the items below.';
@@ -350,8 +505,8 @@ $('submitPerson').addEventListener('click',()=>{
   const name=$('personName').value.trim(); if(!name)return alert('Enter your name.');
   const e=Object.entries(activeSelections).filter(([,q])=>Number(q)>0); if(!e.length)return alert('Add at least one item.');
   let sub=0,selections={};e.forEach(([i,q])=>{selections[i]=Number(q);sub+=items[Number(i)].unit*Number(q)});
-  const tip=sub*.10,total=sub+tip;people.push({name,selections,sub,tip,total});
-  $('resultName').textContent=name;$('resultSub').textContent=money(sub);$('resultTip').textContent=money(tip);$('resultTotal').textContent=money(total);
+  const tip=sub*detectedServiceRate,total=sub+tip;people.push({name,selections,sub,tip,total});
+  $('resultName').textContent=name;$('resultSub').textContent=money(sub);$('resultTip').textContent=money(tip);$('resultTotal').textContent=money(total);$('resultTipLabel').textContent=serviceChargeDetected?'Service charge':'10% tip';
   const done=people.length>=expectedPeople||items.every((_,i)=>remainingQty(i)===0);
   $('nextPerson').textContent=done?'Show Final Summary':'Pass to Next Person';showPage('result');
 });
@@ -362,7 +517,7 @@ $('nextPerson').addEventListener('click',()=>{
 function renderSummary(){
   const rows=people.map(p=>`<div class="summaryRow"><div><strong>${esc(p.name)}</strong><div class="small">${money(p.sub)} + ${money(p.tip)} tip</div></div><div class="amount">${money(p.total)}</div></div>`).join('');
   const sub=people.reduce((s,p)=>s+p.sub,0),tip=people.reduce((s,p)=>s+p.tip,0),total=people.reduce((s,p)=>s+p.total,0);
-  $('summaryList').innerHTML=rows+`<div class="totalbox" style="margin-top:12px"><div><span>Items</span><strong>${money(sub)}</strong></div><div><span>10% tip</span><strong>${money(tip)}</strong></div><div class="grand"><span>Total</span><span>${money(total)}</span></div></div>`;
+  $('summaryList').innerHTML=rows+`<div class="totalbox" style="margin-top:12px"><div><span>Items</span><strong>${money(sub)}</strong></div><div><span>${serviceChargeDetected?'Service charge':'10% tip'}</span><strong>${money(tip)}</strong></div><div class="grand"><span>Total</span><span>${money(total)}</span></div></div>`;
 }
 $('reset').addEventListener('click',()=>location.reload());
 </script>
